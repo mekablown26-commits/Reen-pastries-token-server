@@ -1,0 +1,276 @@
+// Reen Pastries — Prisma Database Schema
+// Database: PostgreSQL (Railway)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// USERS (customers only — owner has no DB account)
+// ─────────────────────────────────────────────
+model User {
+  id            String    @id @default(uuid())
+  firebaseUid   String    @unique
+  email         String    @unique
+  name          String
+  phone         String?
+  photoUrl      String?
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  orders        Order[]
+  reviews       Review[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// CATEGORIES
+// ─────────────────────────────────────────────
+model Category {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  description String?
+  imageUrl    String?
+  isActive    Boolean   @default(true)
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  products    Product[]
+
+  @@map("categories")
+}
+
+// ─────────────────────────────────────────────
+// PRODUCTS (uploaded by owner)
+// ─────────────────────────────────────────────
+model Product {
+  id              String    @id @default(uuid())
+  name            String
+  description     String
+  price           Float
+  imageUrl        String
+  imagePublicId   String?   // Cloudinary public ID for deletion
+  categoryId      String
+  isAvailable     Boolean   @default(true)
+  isOnOffer       Boolean   @default(false)
+  offerPrice      Float?
+  preparationTime Int       @default(60) // in minutes
+  stockCount      Int?      // null = unlimited
+  totalSold       Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  category        Category  @relation(fields: [categoryId], references: [id])
+  orderItems      OrderItem[]
+  reviews         Review[]
+
+  @@map("products")
+}
+
+// ─────────────────────────────────────────────
+// OFFERS / PROMOTIONS (managed by owner)
+// ─────────────────────────────────────────────
+model Offer {
+  id            String      @id @default(uuid())
+  title         String
+  description   String?
+  bannerImageUrl String?
+  discountType  DiscountType
+  discountValue Float       // percentage (0-100) or flat KES amount
+  minOrderAmount Float?     // minimum order to qualify
+  startDate     DateTime
+  endDate       DateTime
+  isActive      Boolean     @default(true)
+  usageCount    Int         @default(0)
+  maxUsage      Int?        // null = unlimited
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@map("offers")
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FLAT_AMOUNT
+  FREE_DELIVERY
+}
+
+// ─────────────────────────────────────────────
+// ORDERS
+// ─────────────────────────────────────────────
+model Order {
+  id                String        @id @default(uuid())
+  orderNumber       String        @unique // human-readable e.g. RP-2024-0001
+  userId            String
+  status            OrderStatus   @default(PENDING)
+  
+  // Pricing
+  subtotal          Float
+  deliveryFee       Float         @default(0)
+  discountAmount    Float         @default(0)
+  totalAmount       Float
+  depositAmount     Float         // 50% of totalAmount
+  remainingAmount   Float         // 50% due on delivery
+  
+  // Payment tracking
+  depositPaid       Boolean       @default(false)
+  depositPaidAt     DateTime?
+  depositTxRef      String?       // MPesa or Google Pay transaction ref
+  finalPaid         Boolean       @default(false)
+  finalPaidAt       DateTime?
+  finalTxRef        String?
+  
+  // Developer revenue share
+  devShareAmount    Float         // calculated at order creation
+  devShareRate      Float         // the % rate used at time of order
+
+  // Cancellation window (30 minutes from order creation)
+  cancelDeadline    DateTime      // createdAt + 30 minutes
+  cancelledAt       DateTime?
+  cancellationReason String?
+
+  // Delivery
+  deliveryAddress   String?
+  deliveryNotes     String?
+  estimatedReadyAt  DateTime?
+
+  offerId           String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  user              User          @relation(fields: [userId], references: [id])
+  items             OrderItem[]
+  payments          Payment[]
+
+  @@map("orders")
+}
+
+enum OrderStatus {
+  PENDING           // just placed, awaiting deposit
+  DEPOSIT_PAID      // 50% deposit received, owner notified
+  CONFIRMED         // owner confirmed and started baking
+  BAKING            // in progress
+  READY             // ready for pickup/delivery
+  DELIVERED         // completed, final payment collected
+  CANCELLED         // cancelled within window
+  REFUNDED          // deposit refunded
+}
+
+// ─────────────────────────────────────────────
+// ORDER ITEMS
+// ─────────────────────────────────────────────
+model OrderItem {
+  id          String    @id @default(uuid())
+  orderId     String
+  productId   String
+  quantity    Int
+  unitPrice   Float     // price at time of order (snapshot)
+  totalPrice  Float
+  notes       String?   // special instructions per item
+
+  order       Order     @relation(fields: [orderId], references: [id])
+  product     Product   @relation(fields: [productId], references: [id])
+
+  @@map("order_items")
+}
+
+// ─────────────────────────────────────────────
+// PAYMENTS
+// ─────────────────────────────────────────────
+model Payment {
+  id              String        @id @default(uuid())
+  orderId         String
+  amount          Float
+  method          PaymentMethod
+  type            PaymentType   // DEPOSIT or FINAL
+  status          PaymentStatus @default(PENDING)
+  transactionRef  String?       // MPesa CheckoutRequestID or Google Pay ref
+  mpesaReceiptNo  String?       // MPesa confirmation receipt
+  phoneNumber     String?       // for MPesa
+  rawResponse     String?       // JSON string of raw gateway response
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  order           Order         @relation(fields: [orderId], references: [id])
+
+  @@map("payments")
+}
+
+enum PaymentMethod {
+  MPESA
+  GOOGLE_PAY
+  CASH_ON_DELIVERY
+}
+
+enum PaymentType {
+  DEPOSIT
+  FINAL
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+// ─────────────────────────────────────────────
+// REVIEWS
+// ─────────────────────────────────────────────
+model Review {
+  id          String    @id @default(uuid())
+  userId      String
+  productId   String
+  rating      Int       // 1-5
+  comment     String?
+  createdAt   DateTime  @default(now())
+
+  user        User      @relation(fields: [userId], references: [id])
+  product     Product   @relation(fields: [productId], references: [id])
+
+  @@unique([userId, productId])
+  @@map("reviews")
+}
+
+// ─────────────────────────────────────────────
+// DEVELOPER CONFIG (your settings, rates, etc.)
+// ─────────────────────────────────────────────
+model DevConfig {
+  id              String    @id @default(uuid())
+  key             String    @unique
+  value           String
+  description     String?
+  updatedAt       DateTime  @updatedAt
+
+  @@map("dev_config")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────
+model Notification {
+  id          String              @id @default(uuid())
+  targetRole  NotificationTarget
+  title       String
+  body        String
+  data        String?             // JSON payload
+  isRead      Boolean             @default(false)
+  createdAt   DateTime            @default(now())
+
+  @@map("notifications")
+}
+
+enum NotificationTarget {
+  OWNER
+  DEV
+  ALL_CUSTOMERS
+}
